@@ -21,6 +21,7 @@ import torch.nn.functional as F
 
 from nanochat.common import get_dist_info, print0, COMPUTE_DTYPE
 from nanochat.optim import MuonAdamW, DistMuonAdamW
+from nanochat.interleaved_attention import InterleavedSelfAttention
 
 # Our custom Flash Attention module that automatically uses FA3 on Hopper+ and SDPA fallback elsewhere
 from nanochat.flash_attention import flash_attn
@@ -33,6 +34,10 @@ class GPTConfig:
     n_head: int = 6 # number of query heads
     n_kv_head: int = 6 # number of key/value heads (GQA)
     n_embd: int = 768
+    attention_type: str = "mha"
+    iha_num_pseudo_heads: int = 2
+    iha_collapse_mode: str = "per_head"
+    iha_mask_mode: str = "flat_causal"
     # Sliding window attention pattern string, tiled across layers. Final layer always L.
     # Characters: L=long (full context), S=short (quarter context)
     # Examples: "L"=all full context, "SL"=alternating, "SSL"=two short then one long
@@ -142,7 +147,12 @@ class MLP(nn.Module):
 class Block(nn.Module):
     def __init__(self, config, layer_idx):
         super().__init__()
-        self.attn = CausalSelfAttention(config, layer_idx)
+        if config.attention_type == "mha":
+            self.attn = CausalSelfAttention(config, layer_idx)
+        elif config.attention_type == "iha":
+            self.attn = InterleavedSelfAttention(config, layer_idx)
+        else:
+            raise ValueError(f"Unknown attention_type: {config.attention_type}")
         self.mlp = MLP(config)
 
     def forward(self, x, ve, cos_sin, window_size, kv_cache):
@@ -159,6 +169,8 @@ class GPT(nn.Module):
         => We actually initialize all data (parameters, buffers, etc.) in init_weights() instead.
         """
         super().__init__()
+        if config.attention_type not in {"mha", "iha"}:
+            raise ValueError(f"Unsupported attention_type: {config.attention_type}")
         self.config = config
         # Compute per-layer window sizes for sliding window attention
         # window_size is (left, right) tuple: (-1, 0) for full context, (N, 0) for sliding window
@@ -192,7 +204,8 @@ class GPT(nn.Module):
         # As for rotary_seq_len, these rotary embeddings are pretty small/cheap in memory,
         # so let's just over-compute them by 10X, but assert fail if we ever reach that amount.
         # In the future we can dynamically grow the cache, for now it's fine.
-        self.rotary_seq_len = config.sequence_len * 10 # 10X over-compute should be enough, TODO make nicer?
+        rotary_factor = config.iha_num_pseudo_heads if config.attention_type == "iha" else 1
+        self.rotary_seq_len = config.sequence_len * 10 * rotary_factor
         head_dim = config.n_embd // config.n_head
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
         self.register_buffer("cos", cos, persistent=False) # persistent=False means it's not saved to the checkpoint
@@ -226,6 +239,8 @@ class GPT(nn.Module):
             torch.nn.init.uniform_(block.attn.c_k.weight, -s, s)
             torch.nn.init.uniform_(block.attn.c_v.weight, -s, s)
             torch.nn.init.zeros_(block.attn.c_proj.weight) # projections are zero
+            if hasattr(block.attn, "reset_iha_parameters"):
+                block.attn.reset_iha_parameters()
             torch.nn.init.uniform_(block.mlp.c_fc.weight, -s * 0.4, s * 0.4)  # 0.4x init scale for c_fc
             torch.nn.init.zeros_(block.mlp.c_proj.weight)
 
@@ -333,7 +348,8 @@ class GPT(nn.Module):
         for window_size in self.window_sizes:
             window = window_size[0]  # (left, right) tuple, we use left
             effective_seq = t if window < 0 else min(window, t)
-            attn_flops += 12 * h * q * effective_seq
+            seq_factor = self.config.iha_num_pseudo_heads ** 2 if self.config.attention_type == "iha" else 1
+            attn_flops += 12 * h * q * effective_seq * seq_factor
         num_flops_per_token = 6 * (nparams - nparams_exclude) + attn_flops
         return num_flops_per_token
 
@@ -412,12 +428,19 @@ class GPT(nn.Module):
         B, T = idx.size()
 
         # Grab the rotary embeddings for the current sequence length (they are of shape (1, seq_len, 1, head_dim/2))
-        assert T <= self.cos.size(1), f"Sequence length grew beyond the rotary embeddings cache: {T} > {self.cos.size(1)}"
+        rotary_factor = self.config.iha_num_pseudo_heads if self.config.attention_type == "iha" else 1
+        rotary_stop = (0 if kv_cache is None else kv_cache.get_pos()) + T
+        assert rotary_stop * rotary_factor <= self.cos.size(1), (
+            f"Sequence length grew beyond the rotary embeddings cache: "
+            f"{rotary_stop * rotary_factor} > {self.cos.size(1)}"
+        )
         assert idx.device == self.cos.device, f"Rotary embeddings and idx are on different devices: {idx.device} != {self.cos.device}"
         assert self.cos.dtype == COMPUTE_DTYPE, f"Rotary embeddings must be in {COMPUTE_DTYPE}, got {self.cos.dtype}"
         # if kv cache exists, we need to offset the rotary embeddings to the current position in the cache
         T0 = 0 if kv_cache is None else kv_cache.get_pos()
-        cos_sin = self.cos[:, T0:T0+T], self.sin[:, T0:T0+T] # truncate cache to current sequence length
+        rotary_start = T0 * rotary_factor
+        rotary_stop = (T0 + T) * rotary_factor
+        cos_sin = self.cos[:, rotary_start:rotary_stop], self.sin[:, rotary_start:rotary_stop]
 
         # Embed the tokens
         x = self.transformer.wte(idx) # embed current token

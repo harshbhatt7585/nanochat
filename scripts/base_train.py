@@ -52,6 +52,10 @@ parser.add_argument("--aspect-ratio", type=int, default=64, help="model_dim = de
 parser.add_argument("--head-dim", type=int, default=128, help="target head dimension for attention")
 parser.add_argument("--max-seq-len", type=int, default=2048, help="max context length")
 parser.add_argument("--window-pattern", type=str, default="SSSL", help="sliding window pattern tiled across layers: L=full, S=half context (e.g. 'SSL')")
+parser.add_argument("--attention-type", type=str, default="mha", choices=["mha", "iha"], help="attention implementation to use")
+parser.add_argument("--iha-num-pseudo-heads", type=int, default=2, help="number of pseudo heads per real head when using IHA")
+parser.add_argument("--iha-collapse-mode", type=str, default="per_head", choices=["per_head", "global"], help="IHA pseudo-head collapse rule")
+parser.add_argument("--iha-mask-mode", type=str, default="flat_causal", choices=["flat_causal", "token_causal", "none"], help="IHA causal masking policy")
 # Training horizon (only one used, in order of precedence)
 parser.add_argument("--num-iterations", type=int, default=-1, help="explicit number of optimization steps (-1 = disable)")
 parser.add_argument("--target-flops", type=float, default=-1.0, help="calculate num_iterations to reach target_flops (-1 = disable)")
@@ -136,6 +140,10 @@ def build_model_meta(depth):
     config = GPTConfig(
         sequence_len=args.max_seq_len, vocab_size=vocab_size,
         n_layer=depth, n_head=num_heads, n_kv_head=num_heads, n_embd=model_dim,
+        attention_type=args.attention_type,
+        iha_num_pseudo_heads=args.iha_num_pseudo_heads,
+        iha_collapse_mode=args.iha_collapse_mode,
+        iha_mask_mode=args.iha_mask_mode,
         window_pattern=args.window_pattern,
     )
     with torch.device("meta"):

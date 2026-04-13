@@ -414,6 +414,10 @@ while True:
                     "n_head": model.config.n_head,
                     "n_kv_head": model.config.n_kv_head,
                     "n_embd": model.config.n_embd,
+                    "attention_type": model.config.attention_type,
+                    "iha_num_pseudo_heads": model.config.iha_num_pseudo_heads,
+                    "iha_collapse_mode": model.config.iha_collapse_mode,
+                    "iha_mask_mode": model.config.iha_mask_mode,
                     "window_pattern": model.config.window_pattern,
                 },
                 "user_config": user_config, # inputs to the training script

@@ -26,6 +26,18 @@ def _patch_missing_config_keys(model_config_kwargs):
     if "window_pattern" not in model_config_kwargs:
         model_config_kwargs["window_pattern"] = "L"
         log0(f"Patching missing window_pattern in model config to 'L'")
+    if "attention_type" not in model_config_kwargs:
+        model_config_kwargs["attention_type"] = "mha"
+        log0("Patching missing attention_type in model config to 'mha'")
+    if "iha_num_pseudo_heads" not in model_config_kwargs:
+        model_config_kwargs["iha_num_pseudo_heads"] = 2
+        log0("Patching missing iha_num_pseudo_heads in model config to 2")
+    if "iha_collapse_mode" not in model_config_kwargs:
+        model_config_kwargs["iha_collapse_mode"] = "per_head"
+        log0("Patching missing iha_collapse_mode in model config to 'per_head'")
+    if "iha_mask_mode" not in model_config_kwargs:
+        model_config_kwargs["iha_mask_mode"] = "flat_causal"
+        log0("Patching missing iha_mask_mode in model config to 'flat_causal'")
 
 def _patch_missing_keys(model_data, model_config):
     """Add default values for new parameters that may be missing in old checkpoints."""
