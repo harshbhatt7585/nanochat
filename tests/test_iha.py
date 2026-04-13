@@ -55,3 +55,19 @@ def test_iha_matches_mha_with_single_pseudo_head():
         iha_logits = iha(idx)
 
     torch.testing.assert_close(mha_logits, iha_logits, rtol=1e-5, atol=1e-5)
+
+
+def test_iha_non_matrix_params_stay_off_muon():
+    model = GPT(_small_config(attention_type="iha", iha_num_pseudo_heads=2))
+    optimizer = model.setup_optimizer()
+
+    muon_params = []
+    adamw_params = []
+    for group in optimizer.param_groups:
+        if group["kind"] == "muon":
+            muon_params.extend(group["params"])
+        else:
+            adamw_params.extend(group["params"])
+
+    assert all(param.ndim == 2 for param in muon_params)
+    assert any(param is model.transformer.h[0].attn.alpha_q for param in adamw_params)
